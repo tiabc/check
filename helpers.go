@@ -211,8 +211,8 @@ func (c *C) internalCheck(funcName string, obtained interface{}, checker Checker
 	names := append([]string{}, info.Params...)
 
 	// Do the actual check.
-	result, error := checker.Check(params, names)
-	if !result || error != "" {
+	result, err := checker.Check(params, names)
+	if !result || err != "" {
 		c.logCaller(2)
 		for i := 0; i != len(params); i++ {
 			c.logValue(names[i], params[i])
@@ -220,8 +220,8 @@ func (c *C) internalCheck(funcName string, obtained interface{}, checker Checker
 		if comment != nil {
 			c.logString(comment.CheckCommentString())
 		}
-		if error != "" {
-			c.logString(error)
+		if err != "" {
+			c.logString(err)
 		}
 		c.logNewLine()
 		c.Fail()
