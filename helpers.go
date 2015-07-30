@@ -214,8 +214,12 @@ func (c *C) internalCheck(funcName string, obtained interface{}, checker Checker
 	result, err := checker.Check(params, names)
 	if !result || err != "" {
 		c.logCaller(2)
-		for i := 0; i != len(params); i++ {
-			c.logValue(names[i], params[i])
+		if _, ok := checker.(*deepEqualsChecker); ok {
+			c.logDiff(params[0], params[1])
+		} else {
+			for i := 0; i != len(params); i++ {
+				c.logValue(names[i], params[i])
+			}
 		}
 		if comment != nil {
 			c.logString(comment.CheckCommentString())

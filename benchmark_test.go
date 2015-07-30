@@ -3,8 +3,8 @@
 package check_test
 
 import (
-	"time"
 	. "github.com/tiabc/check"
+	"time"
 )
 
 var benchmarkS = Suite(&BenchmarkS{})

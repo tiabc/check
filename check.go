@@ -23,6 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/JekaMas/pretty"
 )
 
 // -----------------------------------------------------------------------
@@ -233,6 +235,20 @@ func (c *C) logValue(label string, value interface{}) {
 			}
 		}
 	}
+}
+
+func (c *C) logDiff(obtained, expected interface{}) {
+	var failMessage bytes.Buffer
+	diffs := pretty.Diff(obtained, expected)
+
+	if len(diffs) > 0 {
+		failMessage.WriteString("Obtained:\t\tExpected:")
+		for _, singleDiff := range diffs {
+			failMessage.WriteString(fmt.Sprintf("\n%v", singleDiff))
+		}
+	}
+
+	c.logf("... %s", failMessage.String())
 }
 
 func (c *C) logMultiLine(s string) {
