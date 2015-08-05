@@ -3,7 +3,7 @@
 package check_test
 
 import (
-	. "gopkg.in/check.v1"
+	. "github.com/tiabc/check"
 	"time"
 )
 
@@ -71,5 +71,21 @@ func (s *BenchmarkS) TestBenchmarkBytes(c *C) {
 	Run(&helper, &runConf)
 
 	expected := "PASS: check_test\\.go:[0-9]+: FixtureHelper\\.Benchmark2\t *100\t *[12][0-9]{5} ns/op\t *[4-9]\\.[0-9]{2} MB/s\n"
+	c.Assert(output.value, Matches, expected)
+}
+
+func (s *BenchmarkS) TestBenchmarkMem(c *C) {
+	helper := FixtureHelper{sleep: 100000}
+	output := String{}
+	runConf := RunConf{
+		Output:        &output,
+		Benchmark:     true,
+		BenchmarkMem:  true,
+		BenchmarkTime: 10000000,
+		Filter:        "Benchmark3",
+	}
+	Run(&helper, &runConf)
+
+	expected := "PASS: check_test\\.go:[0-9]+: FixtureHelper\\.Benchmark3\t *100\t *[12][0-9]{5} ns/op\t *[0-9]+ B/op\t *[1-9] allocs/op\n"
 	c.Assert(output.value, Matches, expected)
 }

@@ -1,3 +1,9 @@
+// Package check is a rich testing extension for Go's testing package.
+//
+// For details about the project, see:
+//
+//     http://labix.org/gocheck
+//
 package check
 
 import (
@@ -15,7 +21,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/JekaMas/pretty"
 )
 
 // -----------------------------------------------------------------------
@@ -37,7 +46,7 @@ const (
 	missedSt
 )
 
-type funcStatus int
+type funcStatus uint32
 
 // A method value can't reach its own Method structure.
 type methodType struct {
@@ -74,15 +83,25 @@ func (method *methodType) matches(re *regexp.Regexp) bool {
 type C struct {
 	method    *methodType
 	kind      funcKind
-	status    funcStatus
+	testName  string
+	_status   funcStatus
 	logb      *logger
 	logw      io.Writer
 	done      chan *C
 	reason    string
 	mustFail  bool
 	tempDir   *tempDir
+	benchMem  bool
 	startTime time.Time
 	timer
+}
+
+func (c *C) status() funcStatus {
+	return funcStatus(atomic.LoadUint32((*uint32)(&c._status)))
+}
+
+func (c *C) setStatus(s funcStatus) {
+	atomic.StoreUint32((*uint32)(&c._status), uint32(s))
 }
 
 func (c *C) stopNow() {
@@ -128,7 +147,7 @@ func (td *tempDir) newPath() string {
 	if td.path == "" {
 		var err error
 		for i := 0; i != 100; i++ {
-			path := fmt.Sprintf("%s/check-%d", os.TempDir(), rand.Int())
+			path := fmt.Sprintf("%s%ccheck-%d", os.TempDir(), os.PathSeparator, rand.Int())
 			if err = os.Mkdir(path, 0700); err == nil {
 				td.path = path
 				break
@@ -138,7 +157,7 @@ func (td *tempDir) newPath() string {
 			panic("Couldn't create temporary directory: " + err.Error())
 		}
 	}
-	result := path.Join(td.path, strconv.Itoa(td.counter))
+	result := filepath.Join(td.path, strconv.Itoa(td.counter))
 	td.counter += 1
 	return result
 }
@@ -198,28 +217,38 @@ func hasStringOrError(x interface{}) (ok bool) {
 func (c *C) logValue(label string, value interface{}) {
 	if label == "" {
 		if hasStringOrError(value) {
-			c.logf("... %#v (%q)", value, value)
+			c.logf("... %s", value)
 		} else {
 			c.logf("... %#v", value)
 		}
 	} else if value == nil {
 		c.logf("... %s = nil", label)
 	} else {
-		if hasStringOrError(value) {
-			fv := fmt.Sprintf("%#v", value)
-			qv := fmt.Sprintf("%q", value)
-			if fv != qv {
-				c.logf("... %s %s = %s (%s)", label, reflect.TypeOf(value), fv, qv)
-				return
-			}
-		}
 		if s, ok := value.(string); ok && isMultiLine(s) {
 			c.logf(`... %s %s = "" +`, label, reflect.TypeOf(value))
 			c.logMultiLine(s)
 		} else {
-			c.logf("... %s %s = %#v", label, reflect.TypeOf(value), value)
+			if hasStringOrError(value) {
+				c.logf("... %s %s = %s", label, reflect.TypeOf(value), value)
+			} else {
+				c.logf("... %s %s = %#v", label, reflect.TypeOf(value), value)
+			}
 		}
 	}
+}
+
+func (c *C) logDiff(obtained, expected interface{}) {
+	var failMessage bytes.Buffer
+	diffs := pretty.Diff(obtained, expected)
+
+	if len(diffs) > 0 {
+		failMessage.WriteString("Obtained:\t\tExpected:")
+		for _, singleDiff := range diffs {
+			failMessage.WriteString(fmt.Sprintf("\n%v", singleDiff))
+		}
+	}
+
+	c.logf("... %s", failMessage.String())
 }
 
 func (c *C) logMultiLine(s string) {
@@ -303,26 +332,28 @@ var valueGo = filepath.Join("reflect", "value.go")
 var asmGo = filepath.Join("runtime", "asm_")
 
 func (c *C) logPanic(skip int, value interface{}) {
-	skip += 1 // Our own frame.
+	skip++ // Our own frame.
 	initialSkip := skip
-	for {
+	for ; ; skip++ {
 		if pc, file, line, ok := runtime.Caller(skip); ok {
 			if skip == initialSkip {
 				c.logf("... Panic: %s (PC=0x%X)\n", value, pc)
 			}
 			name := niceFuncName(pc)
 			path := nicePath(file)
-			if name == "Value.call" && strings.HasSuffix(path, valueGo) {
-				break
+			if strings.Contains(path, "/gopkg.in/check.v") {
+				continue
 			}
-			if name == "call16" && strings.Contains(path, asmGo) {
-				break
+			if name == "Value.call" && strings.HasSuffix(path, valueGo) {
+				continue
+			}
+			if (name == "call16" || name == "call32") && strings.Contains(path, asmGo) {
+				continue
 			}
 			c.logf("%s:%d\n  in %s", nicePath(file), line, name)
 		} else {
 			break
 		}
-		skip += 1
 	}
 }
 
@@ -445,7 +476,7 @@ func (tracker *resultTracker) _loopRoutine() {
 				tracker._waiting += 1
 			case c = <-tracker._doneChan:
 				tracker._waiting -= 1
-				switch c.status {
+				switch c.status() {
 				case succeededSt:
 					if c.kind == testKd {
 						if c.mustFail {
@@ -502,6 +533,7 @@ type suiteRunner struct {
 	output                    *outputWriter
 	reportedProblemLast       bool
 	benchTime                 time.Duration
+	benchMem                  bool
 }
 
 type RunConf struct {
@@ -511,6 +543,7 @@ type RunConf struct {
 	Filter        string
 	Benchmark     bool
 	BenchmarkTime time.Duration // Defaults to 1 second
+	BenchmarkMem  bool
 	KeepWorkDir   bool
 }
 
@@ -536,6 +569,7 @@ func newSuiteRunner(suite interface{}, runConf *RunConf) *suiteRunner {
 		output:    newOutputWriter(conf.Output, conf.Stream, conf.Verbose),
 		tracker:   newResultTracker(),
 		benchTime: conf.BenchmarkTime,
+		benchMem:  conf.BenchmarkMem,
 		tempDir:   &tempDir{},
 		keepDir:   conf.KeepWorkDir,
 		tests:     make([]*methodType, 0, suiteNumMethods),
@@ -587,21 +621,21 @@ func (runner *suiteRunner) run() *Result {
 	if runner.tracker.result.RunError == nil && len(runner.tests) > 0 {
 		runner.tracker.start()
 		if runner.checkFixtureArgs() {
-			c := runner.runFixture(runner.setUpSuite, nil)
-			if c == nil || c.status == succeededSt {
+			c := runner.runFixture(runner.setUpSuite, "", nil)
+			if c == nil || c.status() == succeededSt {
 				for i := 0; i != len(runner.tests); i++ {
 					c := runner.runTest(runner.tests[i])
-					if c.status == fixturePanickedSt {
+					if c.status() == fixturePanickedSt {
 						runner.skipTests(missedSt, runner.tests[i+1:])
 						break
 					}
 				}
-			} else if c != nil && c.status == skippedSt {
+			} else if c != nil && c.status() == skippedSt {
 				runner.skipTests(skippedSt, runner.tests)
 			} else {
 				runner.skipTests(missedSt, runner.tests)
 			}
-			runner.runFixture(runner.tearDownSuite, nil)
+			runner.runFixture(runner.tearDownSuite, "", nil)
 		} else {
 			runner.skipTests(missedSt, runner.tests)
 		}
@@ -617,7 +651,7 @@ func (runner *suiteRunner) run() *Result {
 
 // Create a call object with the given suite method, and fork a
 // goroutine with the provided dispatcher for running it.
-func (runner *suiteRunner) forkCall(method *methodType, kind funcKind, logb *logger, dispatcher func(c *C)) *C {
+func (runner *suiteRunner) forkCall(method *methodType, kind funcKind, testName string, logb *logger, dispatcher func(c *C)) *C {
 	var logw io.Writer
 	if runner.output.Stream {
 		logw = runner.output
@@ -628,12 +662,14 @@ func (runner *suiteRunner) forkCall(method *methodType, kind funcKind, logb *log
 	c := &C{
 		method:    method,
 		kind:      kind,
+		testName:  testName,
 		logb:      logb,
 		logw:      logw,
 		tempDir:   runner.tempDir,
 		done:      make(chan *C, 1),
 		timer:     timer{benchTime: runner.benchTime},
 		startTime: time.Now(),
+		benchMem:  runner.benchMem,
 	}
 	runner.tracker.expectCall(c)
 	go (func() {
@@ -645,8 +681,8 @@ func (runner *suiteRunner) forkCall(method *methodType, kind funcKind, logb *log
 }
 
 // Same as forkCall(), but wait for call to finish before returning.
-func (runner *suiteRunner) runFunc(method *methodType, kind funcKind, logb *logger, dispatcher func(c *C)) *C {
-	c := runner.forkCall(method, kind, logb, dispatcher)
+func (runner *suiteRunner) runFunc(method *methodType, kind funcKind, testName string, logb *logger, dispatcher func(c *C)) *C {
+	c := runner.forkCall(method, kind, testName, logb, dispatcher)
 	<-c.done
 	return c
 }
@@ -659,22 +695,22 @@ func (runner *suiteRunner) callDone(c *C) {
 		switch v := value.(type) {
 		case *fixturePanic:
 			if v.status == skippedSt {
-				c.status = skippedSt
+				c.setStatus(skippedSt)
 			} else {
 				c.logSoftPanic("Fixture has panicked (see related PANIC)")
-				c.status = fixturePanickedSt
+				c.setStatus(fixturePanickedSt)
 			}
 		default:
 			c.logPanic(1, value)
-			c.status = panickedSt
+			c.setStatus(panickedSt)
 		}
 	}
 	if c.mustFail {
-		switch c.status {
+		switch c.status() {
 		case failedSt:
-			c.status = succeededSt
+			c.setStatus(succeededSt)
 		case succeededSt:
-			c.status = failedSt
+			c.setStatus(failedSt)
 			c.logString("Error: Test succeeded, but was expected to fail")
 			c.logString("Reason: " + c.reason)
 		}
@@ -688,9 +724,9 @@ func (runner *suiteRunner) callDone(c *C) {
 // goroutine like all suite methods, but this method will not return
 // while the fixture goroutine is not done, because the fixture must be
 // run in a desired order.
-func (runner *suiteRunner) runFixture(method *methodType, logb *logger) *C {
+func (runner *suiteRunner) runFixture(method *methodType, testName string, logb *logger) *C {
 	if method != nil {
-		c := runner.runFunc(method, fixtureKd, logb, func(c *C) {
+		c := runner.runFunc(method, fixtureKd, testName, logb, func(c *C) {
 			c.ResetTimer()
 			c.StartTimer()
 			defer c.StopTimer()
@@ -704,16 +740,16 @@ func (runner *suiteRunner) runFixture(method *methodType, logb *logger) *C {
 // Run the fixture method with runFixture(), but panic with a fixturePanic{}
 // in case the fixture method panics.  This makes it easier to track the
 // fixture panic together with other call panics within forkTest().
-func (runner *suiteRunner) runFixtureWithPanic(method *methodType, logb *logger, skipped *bool) *C {
+func (runner *suiteRunner) runFixtureWithPanic(method *methodType, testName string, logb *logger, skipped *bool) *C {
 	if skipped != nil && *skipped {
 		return nil
 	}
-	c := runner.runFixture(method, logb)
-	if c != nil && c.status != succeededSt {
+	c := runner.runFixture(method, testName, logb)
+	if c != nil && c.status() != succeededSt {
 		if skipped != nil {
-			*skipped = c.status == skippedSt
+			*skipped = c.status() == skippedSt
 		}
-		panic(&fixturePanic{c.status, method})
+		panic(&fixturePanic{c.status(), method})
 	}
 	return c
 }
@@ -726,18 +762,19 @@ type fixturePanic struct {
 // Run the suite test method, together with the test-specific fixture,
 // asynchronously.
 func (runner *suiteRunner) forkTest(method *methodType) *C {
-	return runner.forkCall(method, testKd, nil, func(c *C) {
+	testName := method.String()
+	return runner.forkCall(method, testKd, testName, nil, func(c *C) {
 		var skipped bool
-		defer runner.runFixtureWithPanic(runner.tearDownTest, nil, &skipped)
+		defer runner.runFixtureWithPanic(runner.tearDownTest, testName, nil, &skipped)
 		defer c.StopTimer()
 		benchN := 1
 		for {
-			runner.runFixtureWithPanic(runner.setUpTest, c.logb, &skipped)
+			runner.runFixtureWithPanic(runner.setUpTest, testName, c.logb, &skipped)
 			mt := c.method.Type()
 			if mt.NumIn() != 1 || mt.In(0) != reflect.TypeOf(c) {
 				// Rather than a plain panic, provide a more helpful message when
 				// the argument type is incorrect.
-				c.status = panickedSt
+				c.setStatus(panickedSt)
 				c.logArgPanic(c.method, "*check.C")
 				return
 			}
@@ -757,7 +794,7 @@ func (runner *suiteRunner) forkTest(method *methodType) *C {
 			c.StartTimer()
 			c.method.Call([]reflect.Value{reflect.ValueOf(c)})
 			c.StopTimer()
-			if c.status != succeededSt || c.duration >= c.benchTime || benchN >= 1e9 {
+			if c.status() != succeededSt || c.duration >= c.benchTime || benchN >= 1e9 {
 				return
 			}
 			perOpN := int(1e9)
@@ -773,7 +810,7 @@ func (runner *suiteRunner) forkTest(method *methodType) *C {
 			benchN = roundUp(benchN)
 
 			skipped = true // Don't run the deferred one if this panics.
-			runner.runFixtureWithPanic(runner.tearDownTest, nil, nil)
+			runner.runFixtureWithPanic(runner.tearDownTest, testName, nil, nil)
 			skipped = false
 		}
 	})
@@ -791,8 +828,8 @@ func (runner *suiteRunner) runTest(method *methodType) *C {
 // nice verbose output.
 func (runner *suiteRunner) skipTests(status funcStatus, methods []*methodType) {
 	for _, method := range methods {
-		runner.runFunc(method, testKd, nil, func(c *C) {
-			c.status = status
+		runner.runFunc(method, testKd, "", nil, func(c *C) {
+			c.setStatus(status)
 		})
 	}
 }
@@ -807,9 +844,9 @@ func (runner *suiteRunner) checkFixtureArgs() bool {
 			mt := method.Type()
 			if mt.NumIn() != 1 || mt.In(0) != argType {
 				succeeded = false
-				runner.runFunc(method, fixtureKd, nil, func(c *C) {
+				runner.runFunc(method, fixtureKd, "", nil, func(c *C) {
 					c.logArgPanic(method, "*check.C")
-					c.status = panickedSt
+					c.setStatus(panickedSt)
 				})
 			}
 		}
@@ -823,7 +860,7 @@ func (runner *suiteRunner) reportCallStarted(c *C) {
 
 func (runner *suiteRunner) reportCallDone(c *C) {
 	runner.tracker.callDone(c)
-	switch c.status {
+	switch c.status() {
 	case succeededSt:
 		if c.mustFail {
 			runner.output.WriteCallSuccess("FAIL EXPECTED", c)
@@ -901,7 +938,7 @@ func (ow *outputWriter) WriteCallSuccess(label string, c *C) {
 		if c.reason != "" {
 			suffix = " (" + c.reason + ")"
 		}
-		if c.status == succeededSt {
+		if c.status() == succeededSt {
 			suffix += "\t" + c.timerString()
 		}
 		suffix += "\n"

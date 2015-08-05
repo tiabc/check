@@ -115,7 +115,7 @@ func (lp *linePrinter) Visit(n ast.Node) (w ast.Visitor) {
 }
 
 func (lp *linePrinter) trim(n ast.Node) bool {
-	stmt, ok := n.(ast.Stmt)
+	s, ok := n.(ast.Stmt)
 	if !ok {
 		return true
 	}
@@ -123,7 +123,7 @@ func (lp *linePrinter) trim(n ast.Node) bool {
 	if line != lp.line {
 		return false
 	}
-	switch stmt := stmt.(type) {
+	switch stmt := s.(type) {
 	case *ast.IfStmt:
 		stmt.Body = lp.trimBlock(stmt.Body)
 	case *ast.SwitchStmt:
