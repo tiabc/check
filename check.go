@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/JekaMas/pretty"
+	"github.com/tiabc/pretty"
 )
 
 // -----------------------------------------------------------------------

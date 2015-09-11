@@ -1,11 +1,10 @@
 {
 	"ImportPath": "github.com/tiabc/check",
-	"GoVersion": "go1.4.2",
+	"GoVersion": "go1.5",
 	"Deps": [
 		{
-			"ImportPath": "github.com/JekaMas/pretty",
-			"Comment": "go.weekly.2011-12-22-28-g7837a13",
-			"Rev": "7837a13cc290e9cc2ff1a914b9e07cfa1fc7b1dd"
+			"ImportPath": "github.com/tiabc/pretty",
+			"Rev": "6cd5d2b887495ab20a722902bb8f02e9e60ccdfe"
 		},
 		{
 			"ImportPath": "github.com/kr/text",
